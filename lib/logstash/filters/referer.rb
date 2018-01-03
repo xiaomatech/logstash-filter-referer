@@ -2,8 +2,6 @@
 require "logstash/filters/base"
 require "logstash/namespace"
 require "lru_redux"
-require "tempfile"
-require "thread"
 
 class LogStash::Filters::Referer < LogStash::Filters::Base
   LOOKUP_CACHE = LruRedux::ThreadSafeCache.new(10000)
@@ -14,37 +12,44 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
 
   config :target, :validate => :string, :default => 'referer'
 
-  config :referers_file, :validate => :string,:default => '/etc/logstash/conf.d/referer.yaml'
+  config :referers_file, :validate => :string, :default => '/etc/logstash/conf.d/referer.yaml'
 
   config :lru_cache_size, :validate => :number, :default => 10000
 
   config :prefix, :validate => :string, :default => ''
 
-  def register
-     require 'referer-parser'
-     if @referers_file.nil?
-        begin
-          @parser = RefererParser::Referer.new('http://logstash.net')
-        rescue Exception => e
-          begin
-            if __FILE__ =~ /file:\/.*\.jar!/
-              # Running from a flatjar which has a different layout
-              referers_file = [__FILE__.split("!").first, "/vendor/referer-parser/data/referers.yaml"].join("!")
-              @parser = RefererParser::Referer.new('http://logstash.net', referers_file)
-            else
-              # assume operating from the git checkout
-              @parser = RefererParser::Referer.new('http://logstash.net', "vendor/referers_file/referers.yaml")
-            end
-          rescue => ex
-            raise "Failed to cache, due to: #{ex}\n#{ex.backtrace}"
-          end
-        end
-    else
-        @logger.info("Using referer-parser with external referers.yml", :referers_file => @referers_file)
-        @parser = RefererParser::Referer.new('http://logstash.net', @referers_file)
-    end
+  config :ttl, :validate => :number, :default => 60.0
+  config :lru_cache_size, :validate => :number, :default => 10000
 
-    LOOKUP_CACHE.max_size = @lru_cache_size
+  attr_accessor :lookup_cache
+
+  def register
+    @logger.debug("Registering Referer Filter plugin")
+    self.lookup_cache ||= LruRedux::ThreadSafeCache.new(@lru_cache_size, @ttl)
+    @logger.debug("Created cache...")
+
+    require 'referer-parser'
+    if @referers_file.nil?
+      begin
+        @parser = RefererParser::Referer.new('http://logstash.net')
+      rescue Exception => e
+        begin
+          if __FILE__ =~ /file:\/.*\.jar!/
+            # Running from a flatjar which has a different layout
+            referers_file = [__FILE__.split("!").first, "/vendor/referer-parser/data/referers.yaml"].join("!")
+            @parser = RefererParser::Referer.new('http://logstash.net', referers_file)
+          else
+            # assume operating from the git checkout
+            @parser = RefererParser::Referer.new('http://logstash.net', "vendor/referers_file/referers.yaml")
+          end
+        rescue => ex
+          raise "Failed to cache, due to: #{ex}\n#{ex.backtrace}"
+        end
+      end
+    else
+      @logger.info("Using referer-parser with external referers.yml", :referers_file => @referers_file)
+      @parser = RefererParser::Referer.new('http://logstash.net', @referers_file)
+    end
 
     normalized_target = (@target && @target !~ /^\[[^\[\]]+\]$/) ? "[#{@target}]" : ""
 
@@ -53,9 +58,12 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
     @prefixed_name = "#{normalized_target}[#{@prefix}name]"
     @prefixed_search_term = "#{normalized_target}[#{@prefix}search_term]"
 
-  end #def register
+  end
+
+  #def register
 
   def filter(event)
+    return unless filter?(event)
     referer = event.get(@source)
     referer = referer.first if referer.is_a?(Array)
 
@@ -74,19 +82,19 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
 
     set_fields(event, referer_data)
 
-    filter_matched(event)
+    return filter_matched(event)
   end
 
   def lookup_referer(referer)
     return unless referer
 
-    cached = LOOKUP_CACHE[referer]
+    cached = lookup_cache[referer]
     return cached if cached
 
     referer_data = nil
     referer_data = @parser.parse(referer)
 
-    LOOKUP_CACHE[referer] = referer_data
+    lookup_cache[referer] = referer_data
     referer_data
   end
 
@@ -94,10 +102,10 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
 
   def set_fields(event, referer_data)
     if !referer_data.nil?
-        event.set(@prefixed_known, referer_data.known.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.known
-        event.set(@prefixed_name, referer_data.name.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.name
-        event.set(@prefixed_host, referer_data.host.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.host
-        event.set(@prefixed_search_term, referer_data.search_term.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.search_term
+      event.set(@prefixed_known, referer_data.known.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.known
+      event.set(@prefixed_name, referer_data.name.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.name
+      event.set(@prefixed_host, referer_data.host.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.host
+      event.set(@prefixed_search_term, referer_data.search_term.to_s.dup.force_encoding(Encoding::UTF_8)) if referer_data.search_term
     end
   end
 
