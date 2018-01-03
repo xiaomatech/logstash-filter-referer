@@ -14,9 +14,7 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
 
   config :referers_file, :validate => :string, :default => '/etc/logstash/conf.d/referer.yaml'
 
-  config :lru_cache_size, :validate => :number, :default => 10000
-
-  config :prefix, :validate => :string, :default => ''
+  config :prefix, :validate => :string, :default => 'rf'
 
   config :ttl, :validate => :number, :default => 60.0
   config :lru_cache_size, :validate => :number, :default => 10000
@@ -25,7 +23,7 @@ class LogStash::Filters::Referer < LogStash::Filters::Base
 
   def register
     @logger.debug("Registering Referer Filter plugin")
-    self.lookup_cache ||= LruRedux::ThreadSafeCache.new(@lru_cache_size, @ttl)
+    self.lookup_cache ||= LruRedux::TTL::ThreadSafeCache.new(@lru_cache_size, @ttl)
     @logger.debug("Created cache...")
 
     require 'referer-parser'
